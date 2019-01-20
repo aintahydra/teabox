@@ -18,10 +18,40 @@
 #include "ftrace_hook.h"
 #include "seccomp_filters.h"
 #include "teabox.h"
+#include "netlink_comm.h"
 
 #ifndef CONFIG_X86_64
 # error Only support x86_64 for now
 #endif
+
+/* netlink socket */
+//struct sock *netlink_socket = null;
+//extern struct sock *netlink_socket;
+//int daemon_pid;
+////extern static void tb_init_recv_pol(struct sk_buff *skb);
+
+
+#include <net/sock.h>
+#include <linux/netlink.h>
+#include <linux/skbuff.h>
+/* ******************************************************************************* */
+static void tb_init_recv_pol(struct sk_buff *skb)
+{
+  	struct nlmsghdr *nlh;
+	
+	printk("Entering: %s\n", __FUNCTION__);	
+
+	//access the data through
+	nlh=(struct nlmsghdr*)skb->data;
+
+	// void *NLMSG_DATA(strct nlmsghdr *nlh)
+ 	printk(KERN_INFO "received policy payload:%s from the sender(%d)\n", \
+	       (char*)nlmsg_data(nlh), nlh->nlmsg_pid);
+
+	//return 1;
+}
+
+/* ******************************************************************************* */
 
 /**
  * get_usr_string() - keep a copy of a userland string 
@@ -72,13 +102,14 @@ static int print_current_stat(void)
  */
 static char *get_current_working_dir(char **cwd)
 {
+	char *cwdbuf;
 	struct path pwd;
 	get_fs_pwd(current->fs, &pwd);
 
-	char *cwdbuf = (char *)kmalloc(PATH_MAX, GFP_KERNEL);
+	cwdbuf = (char *)kmalloc(PATH_MAX, GFP_KERNEL);
 	if (!cwdbuf) {
 	        pr_debug("Memory allocation error\n");
-		return -1;
+		return NULL;
 	}
 	memset(cwdbuf, 0, PATH_MAX);
 	*cwd = (char *)dentry_path_raw(pwd.dentry, cwdbuf, PATH_MAX);
@@ -89,7 +120,7 @@ static char *get_current_working_dir(char **cwd)
 
 /**
  * get_env_vars() - list up the environment variables
- *
+ *                    
  * @envp: a vector array to the environment variables. It originates from execve().
  * 
  * Returns: the number of environment variables, or -1 (abnormal)
@@ -101,6 +132,7 @@ static int get_env_vars(const char __user *const __user *envp)
 {
 	int envnum = 0;
 	int len = -1;
+char *kernel_envvar;
 
 	for(;;) { /* loop until there's no argument */
 		const char __user *eptr; /* it will point to each of arguments */
@@ -130,7 +162,8 @@ static int get_env_vars(const char __user *const __user *envp)
 			return -1;
 
 		/* keep a copy of the argument in the kernel-land */
-		char *kernel_envvar = get_usr_string(eptr, MAX_ARG_STRLEN);
+		//char *kernel_envvar;
+		kernel_envvar = get_usr_string(eptr, MAX_ARG_STRLEN);
 		if (NULL != kernel_envvar) {
 			pr_debug("-- envv[%d]: %s\n", envnum, kernel_envvar);
 			kfree(kernel_envvar);
@@ -162,12 +195,16 @@ static int check_argvs(const char __user *const __user *argv)
 	int ret = 0;
        	int argnum = 0;
 	int len = -1;
+	const char __user *ptr; /* it will point to each of arguments */
+	int tempret;
+	char *kernel_argstr;
 	
 	for(;;) { /* loop until there's no argument */
     
-		const char __user *ptr; /* it will point to each of arguments */
+		//const char __user *ptr; /* it will point to each of arguments */
 
-		int tempret = get_user(ptr, argv + argnum);
+		//int tempret;
+		tempret = get_user(ptr, argv + argnum);
 	
 		if (tempret) {
 			pr_debug("Getting an argument failed");
@@ -190,7 +227,8 @@ static int check_argvs(const char __user *const __user *argv)
 			return -1;
 		}
 
-		char *kernel_argstr = get_usr_string(ptr, MAX_ARG_STRLEN);
+		//char *kernel_argstr;
+		kernel_argstr = get_usr_string(ptr, MAX_ARG_STRLEN);
 		if (argnum == 0) {
 			if (kernel_argstr[0] == '.') {
 				ret = 1;
@@ -236,7 +274,8 @@ static asmlinkage long tb_sys_clone(unsigned long clone_flags,
 {
 	long ret;
 
-	pr_info("clone() staring up, at PID: %ld\n", current->pid);
+	//pr_info("clone() staring up, at PID: %ld\n", current->pid);
+	pr_info("clone() staring up, at PID: %d\n", current->pid);
 	
 	ret = orig_sys_clone(clone_flags, newsp, parent_tidptr,
 		child_tidptr, tls);
@@ -253,9 +292,17 @@ static asmlinkage long tb_sys_execve(const char __user *filename,
 				     const char __user *const __user *argv,
 				     const char __user *const __user *envp)
 {
-        long ret;
+	int curpid;
+	char *cwd_path = NULL;
+	char *cwd_buf = NULL;
 
-	pr_info("execve hooked (pre) ########### ");
+	char *kernel_filename;
+	bool athome = false;
+	int argv0_path = 0;
+	struct sock_fprog prog;
+
+	long ret;
+
 	
 	static asmlinkage long (*sys_prctl)(int option,
 					    unsigned long arg2,
@@ -266,35 +313,49 @@ static asmlinkage long tb_sys_execve(const char __user *filename,
 	static asmlinkage long (*sys_seccomp)(unsigned int op,
 					      unsigned int flags,
 					      const char __user *uargs);
+
+	
+	pr_info("execve hooked (pre) ########### ");
+
 	
 	sys_prctl = kallsyms_lookup_name("sys_prctl");
 	sys_seccomp = kallsyms_lookup_name("sys_seccomp");
 
-
-	struct sock_fprog prog;
-	//	if (set_filterset(&prog, TBF_MUNDANE) < 0) {
-		if (set_filterset(&prog, TBF_NETWORKING_PYTHON) < 0) {
-		pr_debug("filterset error");	
-	}
 	
-	int curpid = print_current_stat();
+	//int curpid;
+	curpid = print_current_stat();
 
-	char *cwd_path = NULL;
-	char *cwd_buf = NULL;
+	//	char *cwd_path = NULL;
+	//char *cwd_buf = NULL;
+
 	cwd_buf = get_current_working_dir(&cwd_path);
 
-	bool athome = false;
+
 	if (cwd_path != NULL && strstr(cwd_path, "home"))
 		athome = true;
 	/* TO-DO: tmp dir and euid would be considered as well */
 
-	char *kernel_filename = get_usr_string(filename, MAX_ARG_STRLEN);
+	//	char *kernel_filename;
+	  kernel_filename = get_usr_string(filename, MAX_ARG_STRLEN);
 	pr_info("- filename to launch: %s\n", kernel_filename);
 
 	get_env_vars(envp);
 
-	int argv0_path = 0;
+	//int argv0_path = 0;
 	argv0_path = check_argvs(argv);
+
+	
+	//
+	// TODO: Here the netlink communication has to be placed
+	//
+	//
+
+	//struct sock_fprog prog;
+	//	if (set_filterset(&prog, TBF_MUNDANE) < 0) {
+		if (set_filterset(&prog, TBF_NETWORKING_PYTHON) < 0) {
+		pr_debug("filterset error");	
+	}
+
 	
 	/* apply the filter */
 	if ((athome == true && argv0_path == 1 )
@@ -305,6 +366,7 @@ static asmlinkage long tb_sys_execve(const char __user *filename,
 		/* in case of setuid applications(e.g., ping), 
 		 *   PR_SET_NO_NEW_PRIVS must not be included. 
 		 * otherwise, PR_SET_NO_NEW_PRIVS should be needed */
+		/*
 		if (sys_prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
 			pr_debug("prctl(NO_NEW_PRIVS) Error");
 			goto TEMP2;
@@ -315,6 +377,7 @@ static asmlinkage long tb_sys_execve(const char __user *filename,
 			pr_debug("prctl(SECCOMP) Error");
 			goto TEMP2;
 		}
+		*/
 	}
   
 TEMP2:  
@@ -335,13 +398,46 @@ static struct ftrace_hook replaced_hooks[] = {
 
 static int teabox_init(void)
 {
+	
 	int err;
 
+	struct netlink_kernel_cfg nlcfg = {
+		.input = tb_init_recv_pol,
+	};
+	
+	printk("Entering: %s\n", __FUNCTION__);
+
+	/* installing hooks */
 	err = fh_install_hooks(replaced_hooks, ARRAY_SIZE(replaced_hooks));
 	if (err)
 		return err;
 
-	pr_info("teabox loaded");
+	pr_info("hook installed");
+
+	/* preparing netlink communication */
+	//struct netlink_kernel_cfg nlcfg = {
+	//	.input = tb_init_recv_pol,
+	//};
+	/* most drivers use init_net namespace */ 
+	netlink_socket = netlink_kernel_create(&init_net, NETLINK_USER, &nlcfg);
+
+
+	
+	if(!netlink_socket){
+		printk(KERN_ALERT "Error creating socket.\n");
+		return -1;
+	}
+
+	/*
+	daemon_pid = -1;
+	while (daemon_pid != -1) {
+		struct sk_buff skbuff;
+		tb_revb_pol(skbuff);
+
+		
+	}
+	*/	
+	pr_info("daemon connected");
 
 	return 0;
 }
@@ -349,8 +445,14 @@ module_init(teabox_init);
 
 static void teabox_exit(void)
 {
+	printk("Entering: %s\n",__FUNCTION__);
+	
+        // cleaning up up the hook
 	fh_remove_hooks(replaced_hooks, ARRAY_SIZE(replaced_hooks));
 
+	// removing the netfilter 
+	netlink_kernel_release(netlink_socket);
+	
 	pr_info("teabox unloaded");
 }
 module_exit(teabox_exit);
