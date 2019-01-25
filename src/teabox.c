@@ -18,37 +18,30 @@
 #include "ftrace_hook.h"
 #include "seccomp_filters.h"
 #include "teabox.h"
-#include "netlink_comm.h"
 
 #ifndef CONFIG_X86_64
 # error Only support x86_64 for now
 #endif
 
-/* netlink socket */
-//struct sock *netlink_socket = null;
-//extern struct sock *netlink_socket;
-//int daemon_pid;
-////extern static void tb_init_recv_pol(struct sk_buff *skb);
-
-
 #include <net/sock.h>
 #include <linux/netlink.h>
 #include <linux/skbuff.h>
-/* ******************************************************************************* */
-static void tb_init_recv_pol(struct sk_buff *skb)
-{
-  	struct nlmsghdr *nlh;
-	
-	printk("Entering: %s\n", __FUNCTION__);	
+#include "netlink_comm.h"
 
-	//access the data through
-	nlh=(struct nlmsghdr*)skb->data;
 
-	// void *NLMSG_DATA(strct nlmsghdr *nlh)
- 	printk(KERN_INFO "received policy payload:%s from the sender(%d)\n", \
-	       (char*)nlmsg_data(nlh), nlh->nlmsg_pid);
+//struct sock *netlink_socket = NULL;
 
-	//return 1;
+
+static void netlink_cleanup(void) {
+
+	int rc = 0;
+
+	// unregister faily (fops unregisters automatically)
+	rc = genl_unregister_family(&teabox_gnl_family);
+	if(rc != 0) {
+		printk(KERN_INFO "Failed to unregister netlink family\n");
+	}
+	return;
 }
 
 /* ******************************************************************************* */
@@ -349,6 +342,19 @@ static asmlinkage long tb_sys_execve(const char __user *filename,
 	// TODO: Here the netlink communication has to be placed
 	//
 	//
+	char *file_category = "This is a category info";
+	int rc2 = teabox_send_polreq(file_category);
+
+
+	//
+	//
+	//
+	//
+
+
+
+
+	
 
 	//struct sock_fprog prog;
 	//	if (set_filterset(&prog, TBF_MUNDANE) < 0) {
@@ -401,9 +407,9 @@ static int teabox_init(void)
 	
 	int err;
 
-	struct netlink_kernel_cfg nlcfg = {
-		.input = tb_init_recv_pol,
-	};
+//	struct netlink_kernel_cfg nlcfg = {
+//		.input = tb_init_recv_pol,
+//	};
 	
 	printk("Entering: %s\n", __FUNCTION__);
 
@@ -411,23 +417,30 @@ static int teabox_init(void)
 	err = fh_install_hooks(replaced_hooks, ARRAY_SIZE(replaced_hooks));
 	if (err)
 		return err;
-
+	
 	pr_info("hook installed");
 
+/* ******************************************************************************* */	
 	/* preparing netlink communication */
-	//struct netlink_kernel_cfg nlcfg = {
-	//	.input = tb_init_recv_pol,
-	//};
+	struct netlink_kernel_cfg nlcfg = {
+		.input = teabox_received_msg_handler,
+	};
+
+	teabox_nl_sock = netlink_kernel_create(&init_net, NETLINK_USER, &nlcfg);
+	if (!teabox_nl_sock) {
+		printk(KERN_ALERT "Error creating socket\n");
+		return -1;
+	}
 	/* most drivers use init_net namespace */ 
+
+	/* OLD
 	netlink_socket = netlink_kernel_create(&init_net, NETLINK_USER, &nlcfg);
-
-
 	
 	if(!netlink_socket){
 		printk(KERN_ALERT "Error creating socket.\n");
 		return -1;
 	}
-
+	*/	
 	/*
 	daemon_pid = -1;
 	while (daemon_pid != -1) {
@@ -436,11 +449,35 @@ static int teabox_init(void)
 
 		
 	}
-	*/	
-	pr_info("daemon connected");
+	*/
+	//pr_info("daemon connected");
+/* ******************************************************************************* */
+	int rc = 0; 
 
+	// register generic netlink family
+	// corrected referring: http://www.linuxforums.org/forum/kernel/209698-genl_register_ops-genl_register_family_with_ops-v-v-linux-4-10-a.html
+
+	// an OLDOLD way
+	//rc = genl_register_family(&teabox_gnl_family);
+	//rc = genl_register_ops(&teabox_gnl_family, &teabox_gnl_ops_polreq);
+
+	// an OLD way
+	//rc = genl_register_family_with_ops(&teabox_gnl_family,
+	//				   &teabox_gnl_ops_polreq, ARRAY_SIZE(teabox_gnl_ops_polreq));
+	
+	rc = genl_register_family(&teabox_gnl_family);
+	if (rc != 0) {
+		printk(KERN_INFO "Failed to register multicast group\n");
+		goto fail;
+	}
+	
 	return 0;
+
+fail:
+	netlink_cleanup();
+	return -EINVAL;
 }
+
 module_init(teabox_init);
 
 static void teabox_exit(void)
@@ -451,7 +488,11 @@ static void teabox_exit(void)
 	fh_remove_hooks(replaced_hooks, ARRAY_SIZE(replaced_hooks));
 
 	// removing the netfilter 
+	/* OLD
 	netlink_kernel_release(netlink_socket);
+	*/
+	
+	netlink_cleanup();
 	
 	pr_info("teabox unloaded");
 }

@@ -1,0 +1,92 @@
+#include <linux/module.h>	/* Needed by all modules */
+#include <linux/kernel.h>	/* Needed for KERN_INFO */
+#include <linux/version.h>  /* KERNEL_VERSION macro */
+#include <linux/init.h>		/* Needed for the init macros */
+
+#include <net/netlink.h>    /* Common Netlink API */
+#include <net/genetlink.h>  /* Special Generic Netlink API */
+
+//#include <linux/keyboard.h> /* Needed for                   */
+//#include <linux/notifier.h> /*            keyboard notifier */
+
+#include <linux/hardirq.h>
+
+#include "teabox_common.h"
+
+#define tbx_log(level, fmt, args...) printk(level "Keymon: In %s:%d. " fmt, __FUNCTION__, __LINE__, ## args)
+
+// ---------------------------------------------------------------------------
+// Keymon work queue.
+//
+// Used to defer work from keyboard notification callback 
+// (which is in atomic/irq context) to kernel thread handling workqueue.
+static struct workqueue_struct *teabox_wq;
+#define TEABOX_WQ_NAME "teabox_wq"
+
+// Work struct passed to handler
+//struct keymon_notification
+struct teabox_policy_request
+{
+/*
+	int down;           // Pressure of the key?
+	int shift;          // Current shift mask
+	int ledstate;		// Current led state
+	unsigned int value; // keycode, unicode value or keysym
+*/
+	int category;
+	int level;
+	
+	struct work_struct ws;  // Workqueue item
+};
+// ---------------------------------------------------------------------------
+
+//static int keymon_genl_notify_dump( struct sk_buff *skb, struct netlink_callback *cb );
+static int teabox_genl_notify_dump( struct sk_buff *skb, struct netlink_callback *cb );
+//
+//static int keymon_kb_nf_cb( struct notifier_block *nb, unsigned long code, void *_param );
+//static int teabox_exec_polreq_cb(struct notifier_block *nb, int filecat, int filelev)
+static int teabox_exec_polreq_cb(int filecat, int filelev);
+
+// -----------------------------------------------------------------------------
+// Keymon generic netlink family definition
+// -----------------------------------------------------------------------------
+//struct genl_family keymon_genl_family = {
+struct genl_family teabox_genl_family = {
+//.id      = GENL_ID_GENERATE, // Generate ID 
+	.hdrsize = 0, // No custom header
+	.name    = TEABOX_GENL_FAMILY_NAME,
+	.version = TEABOX_GENL_VERSION,
+	.maxattr = TEABOX_GENL_ATTR_MAX
+};
+
+// Multicast group for netlink family
+//struct genl_multicast_group keymon_mc_group = {
+struct genl_multicast_group teabox_mc_group = {
+	.name = TEABOX_MC_GROUP_NAME
+};
+
+// -----------------------------------------------------------------------------
+// Keymon generic netlink operations for generic netlink family defined above
+// -----------------------------------------------------------------------------
+//struct genl_ops keymon_genl_ops[] = {
+struct genl_ops teabox_genl_ops[] = {
+	{
+		.cmd    = TEABOX_GENL_CMD_REQPOL,
+		.doit   = NULL,
+		.dumpit = teabox_genl_notify_dump, 
+		.policy = teabox_nla_policy
+	},
+};
+
+// -----------------------------------------------------------------------------
+// EXEC notifier/reqpol // Keyboard notifier  
+// -----------------------------------------------------------------------------
+//static struct notifier_block keymon_kb_nf = {
+//	.notifier_call = keymon_kb_nf_cb
+//};
+
+/*
+static struct notifier_block teabox_exec_nf = {
+	.notifier_call = teabox_exec_polreq_cb
+};
+*/
