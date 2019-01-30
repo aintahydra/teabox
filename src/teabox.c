@@ -23,28 +23,16 @@
 # error Only support x86_64 for now
 #endif
 
-#include <net/sock.h>
+// for netlink
+#include <linux/module.h>
+#include <linux/kernel.h>
 #include <linux/netlink.h>
-#include <linux/skbuff.h>
-#include "netlink_comm.h"
+#include <net/netlink.h>
+#include <net/net_namespace.h>
+#include "teabox_nl_common.h"
 
+static struct sock *tb_nl_sk = NULL;
 
-//struct sock *netlink_socket = NULL;
-
-
-static void netlink_cleanup(void) {
-
-	int rc = 0;
-
-	// unregister faily (fops unregisters automatically)
-	rc = genl_unregister_family(&teabox_gnl_family);
-	if(rc != 0) {
-		printk(KERN_INFO "Failed to unregister netlink family\n");
-	}
-	return;
-}
-
-/* ******************************************************************************* */
 
 /**
  * get_usr_string() - keep a copy of a userland string 
@@ -125,7 +113,7 @@ static int get_env_vars(const char __user *const __user *envp)
 {
 	int envnum = 0;
 	int len = -1;
-char *kernel_envvar;
+	char *kernel_envvar;
 
 	for(;;) { /* loop until there's no argument */
 		const char __user *eptr; /* it will point to each of arguments */
@@ -155,7 +143,6 @@ char *kernel_envvar;
 			return -1;
 
 		/* keep a copy of the argument in the kernel-land */
-		//char *kernel_envvar;
 		kernel_envvar = get_usr_string(eptr, MAX_ARG_STRLEN);
 		if (NULL != kernel_envvar) {
 			pr_debug("-- envv[%d]: %s\n", envnum, kernel_envvar);
@@ -194,9 +181,6 @@ static int check_argvs(const char __user *const __user *argv)
 	
 	for(;;) { /* loop until there's no argument */
     
-		//const char __user *ptr; /* it will point to each of arguments */
-
-		//int tempret;
 		tempret = get_user(ptr, argv + argnum);
 	
 		if (tempret) {
@@ -220,7 +204,6 @@ static int check_argvs(const char __user *const __user *argv)
 			return -1;
 		}
 
-		//char *kernel_argstr;
 		kernel_argstr = get_usr_string(ptr, MAX_ARG_STRLEN);
 		if (argnum == 0) {
 			if (kernel_argstr[0] == '.') {
@@ -267,11 +250,10 @@ static asmlinkage long tb_sys_clone(unsigned long clone_flags,
 {
 	long ret;
 
-	//pr_info("clone() staring up, at PID: %ld\n", current->pid);
 	pr_info("clone() staring up, at PID: %d\n", current->pid);
 	
 	ret = orig_sys_clone(clone_flags, newsp, parent_tidptr,
-		child_tidptr, tls);
+			     child_tidptr, tls);
 
 	pr_info("clone() finishing up, new child thread: %ld\n", ret);
 
@@ -306,21 +288,14 @@ static asmlinkage long tb_sys_execve(const char __user *filename,
 	static asmlinkage long (*sys_seccomp)(unsigned int op,
 					      unsigned int flags,
 					      const char __user *uargs);
-
 	
 	pr_info("execve hooked (pre) ########### ");
-
 	
 	sys_prctl = kallsyms_lookup_name("sys_prctl");
 	sys_seccomp = kallsyms_lookup_name("sys_seccomp");
 
 	
-	//int curpid;
 	curpid = print_current_stat();
-
-	//	char *cwd_path = NULL;
-	//char *cwd_buf = NULL;
-
 	cwd_buf = get_current_working_dir(&cwd_path);
 
 
@@ -328,37 +303,23 @@ static asmlinkage long tb_sys_execve(const char __user *filename,
 		athome = true;
 	/* TO-DO: tmp dir and euid would be considered as well */
 
-	//	char *kernel_filename;
-	  kernel_filename = get_usr_string(filename, MAX_ARG_STRLEN);
+	kernel_filename = get_usr_string(filename, MAX_ARG_STRLEN);
 	pr_info("- filename to launch: %s\n", kernel_filename);
 
 	get_env_vars(envp);
 
-	//int argv0_path = 0;
 	argv0_path = check_argvs(argv);
 
+
 	
-	//
-	// TODO: Here the netlink communication has to be placed
-	//
-	//
+	// netlink communciation
 	char *file_category = "This is a category info";
-	int rc2 = teabox_send_polreq(file_category);
+	tb_nl_send_query(tb_nl_sk, "This is a category info");
 
 
-	//
-	//
-	//
-	//
-
-
-
-
-	
-
-	//struct sock_fprog prog;
+	// set filterset
 	//	if (set_filterset(&prog, TBF_MUNDANE) < 0) {
-		if (set_filterset(&prog, TBF_NETWORKING_PYTHON) < 0) {
+	if (set_filterset(&prog, TBF_NETWORKING_PYTHON) < 0) {
 		pr_debug("filterset error");	
 	}
 
@@ -373,16 +334,16 @@ static asmlinkage long tb_sys_execve(const char __user *filename,
 		 *   PR_SET_NO_NEW_PRIVS must not be included. 
 		 * otherwise, PR_SET_NO_NEW_PRIVS should be needed */
 		/*
-		if (sys_prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
-			pr_debug("prctl(NO_NEW_PRIVS) Error");
-			goto TEMP2;
-			}
+		  if (sys_prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
+		  pr_debug("prctl(NO_NEW_PRIVS) Error");
+		  goto TEMP2;
+		  }
 
-		if (sys_prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
-			      (unsigned long)&prog, 0, 0) < 0) {
-			pr_debug("prctl(SECCOMP) Error");
-			goto TEMP2;
-		}
+		  if (sys_prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
+		  (unsigned long)&prog, 0, 0) < 0) {
+		  pr_debug("prctl(SECCOMP) Error");
+		  goto TEMP2;
+		  }
 		*/
 	}
   
@@ -407,11 +368,22 @@ static int teabox_init(void)
 	
 	int err;
 
-//	struct netlink_kernel_cfg nlcfg = {
-//		.input = tb_init_recv_pol,
-//	};
+	//printk("Entering: %s\n", __FUNCTION__);
 	
-	printk("Entering: %s\n", __FUNCTION__);
+	/* preparing netlink communication */
+	struct netlink_kernel_cfg nlcfg = {
+		.input = tb_nl_policy_parser,
+	};
+
+	tb_nl_sk = netlink_kernel_create(&init_net, TBNL_PROTOCOL, &nlcfg);
+	if (!tb_nl_sk) {
+		pr_err("Error creating socket.\n");
+		return -10;
+	} else {
+		pr_info("Created a netlink socket.\n");
+	}
+	
+
 
 	/* installing hooks */
 	err = fh_install_hooks(replaced_hooks, ARRAY_SIZE(replaced_hooks));
@@ -420,62 +392,8 @@ static int teabox_init(void)
 	
 	pr_info("hook installed");
 
-/* ******************************************************************************* */	
-	/* preparing netlink communication */
-	struct netlink_kernel_cfg nlcfg = {
-		.input = teabox_received_msg_handler,
-	};
-
-	teabox_nl_sock = netlink_kernel_create(&init_net, NETLINK_USER, &nlcfg);
-	if (!teabox_nl_sock) {
-		printk(KERN_ALERT "Error creating socket\n");
-		return -1;
-	}
-	/* most drivers use init_net namespace */ 
-
-	/* OLD
-	netlink_socket = netlink_kernel_create(&init_net, NETLINK_USER, &nlcfg);
-	
-	if(!netlink_socket){
-		printk(KERN_ALERT "Error creating socket.\n");
-		return -1;
-	}
-	*/	
-	/*
-	daemon_pid = -1;
-	while (daemon_pid != -1) {
-		struct sk_buff skbuff;
-		tb_revb_pol(skbuff);
-
-		
-	}
-	*/
-	//pr_info("daemon connected");
-/* ******************************************************************************* */
-	int rc = 0; 
-
-	// register generic netlink family
-	// corrected referring: http://www.linuxforums.org/forum/kernel/209698-genl_register_ops-genl_register_family_with_ops-v-v-linux-4-10-a.html
-
-	// an OLDOLD way
-	//rc = genl_register_family(&teabox_gnl_family);
-	//rc = genl_register_ops(&teabox_gnl_family, &teabox_gnl_ops_polreq);
-
-	// an OLD way
-	//rc = genl_register_family_with_ops(&teabox_gnl_family,
-	//				   &teabox_gnl_ops_polreq, ARRAY_SIZE(teabox_gnl_ops_polreq));
-	
-	rc = genl_register_family(&teabox_gnl_family);
-	if (rc != 0) {
-		printk(KERN_INFO "Failed to register multicast group\n");
-		goto fail;
-	}
 	
 	return 0;
-
-fail:
-	netlink_cleanup();
-	return -EINVAL;
 }
 
 module_init(teabox_init);
@@ -484,15 +402,11 @@ static void teabox_exit(void)
 {
 	printk("Entering: %s\n",__FUNCTION__);
 	
-        // cleaning up up the hook
+        // clean up the hook
 	fh_remove_hooks(replaced_hooks, ARRAY_SIZE(replaced_hooks));
 
-	// removing the netfilter 
-	/* OLD
-	netlink_kernel_release(netlink_socket);
-	*/
-	
-	netlink_cleanup();
+	// clean up netlink
+	netlink_kernel_release(tb_nl_sk);
 	
 	pr_info("teabox unloaded");
 }
